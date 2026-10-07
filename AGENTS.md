@@ -116,4 +116,6 @@ PdfCraft opens files from strangers, and people trust it with their work. A malf
 
 ## 5. Everything else
 
+- **Contributor credits are compiled in.** About ▸ Contributors/Models come from `contributors/contributors.json`, baked into the binary by `crates/ui-egui/build.rs` (never read at run time). Regenerate it with craftrules' `scripts/contributors.py` (`python3 scripts/contributors.py <path to this repo>`, run from a craftrules checkout) and commit it; never hand-edit it. GitHub usernames only; display and real names only with consent recorded in craftrules `contributors/people.toml`. See `docs/contributors.md`.
+
 Follow `CLAUDE.md`. It covers quality gates, layering, commit rules and how to run and look at the app.
