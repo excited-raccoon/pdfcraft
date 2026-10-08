@@ -181,6 +181,11 @@ fn form(bbox: [f64; 4], content: &[u8], resources: Dict) -> Stream {
 
 /// Draw the normal appearance of an annotation, or `None` if this subtype/variant isn't supported.
 pub fn build(d: &Dict) -> Option<Stream> {
+    // Imported measurement appearances may include leaders, captions and formatting that
+    // this builder cannot reproduce. Preserve them rather than silently losing detail.
+    if d.contains(b"Measure") && !d.contains(b"PCMeasureValue") {
+        return None;
+    }
     let subtype = d.name(b"Subtype")?.to_vec();
     let rect = nums(d, b"Rect").filter(|r| r.len() == 4)?;
     let rect = [rect[0].min(rect[2]), rect[1].min(rect[3]), rect[0].max(rect[2]), rect[1].max(rect[3])];
@@ -581,6 +586,33 @@ pub fn build(d: &Dict) -> Option<Stream> {
             return Some(form(full, &out, res));
         }
         _ => return None,
+    }
+    // PdfCraft measurement captions are kept separate from the comment's free-form text.
+    // A restyle regenerates the path and its value together.
+    if let Some(value) = d.get(b"PCMeasureValue").and_then(Object::as_string) {
+        let value = value.to_text();
+        if value.len() <= 256 && matches!(subtype.as_slice(), b"Line" | b"PolyLine" | b"Polygon") {
+            let size = 10.0;
+            let x = (rect[0] + rect[2] - text_width(&value, size)) * 0.5;
+            let y = rect[3] - 12.0;
+            let col = stroke.unwrap_or([0.0, 0.47, 0.84]);
+            c.push_str(&format!(
+                "{}BT /Helv {} Tf {} {} Td {} Tj ET\n",
+                rg(col),
+                n(size),
+                n(x),
+                n(y),
+                String::from_utf8_lossy(&literal(&win_ansi(&value)))
+            ));
+            let mut font = Dict::new();
+            font.set(b"Type".to_vec(), Object::name("Font"));
+            font.set(b"Subtype".to_vec(), Object::name("Type1"));
+            font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
+            font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+            let mut fonts = Dict::new();
+            fonts.set(b"Helv".to_vec(), Object::Dict(font));
+            res.set(b"Font".to_vec(), Object::Dict(fonts));
+        }
     }
     Some(form(rect, c.as_bytes(), res))
 }
