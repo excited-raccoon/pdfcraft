@@ -12,15 +12,15 @@ Detailed task lists and acceptance tests are in `plan/execution-plan.md` (local-
 
 The unit is **wall-clock hours of agent work** (Claude Opus 5.5 coding continuously; human review time not included).
 
-**Where we are (2026-10-08, measured by `cargo xtask parity` over 806 tracked Acrobat Pro features; 23 more are Adobe-cloud-only and out of scope):**
+**Where we are (2026-10-07, measured by `cargo xtask parity` over 806 tracked Acrobat Pro features; 23 more are Adobe-cloud-only and out of scope):**
 
 | Tier | Features | Shipped | Partial | Shipped % | Weighted % (partial = ½) |
 |---|---|---|---|---|---|
 | P0 (must-have for 1.0) | 251 | 222 | 25 | 88.4% | 93.4% |
 | P1 | 326 | 174 | 38 | 53.4% | 59.2% |
-| P2 | 186 | 16 | 5 | 8.6% | 9.9% |
+| P2 | 186 | 14 | 7 | 7.5% | 9.4% |
 | P3 | 43 | 1 | 0 | 2.3% | 2.3% |
-| **All** | **806** | **413** | **68** | **51.2%** | **55.5%** |
+| **All** | **806** | **411** | **70** | **51.0%** | **55.3%** |
 
 **Effort-weighted parity: ≈ 30–35%.** Feature counts overstate progress: the remaining features include the hardest ones (our own renderer and font engine, editing existing text and reflow, OCR beyond Latin, XFA, PDF/A/X/UA preflight, Office export, long-term signature validation). Weighting each milestone by its estimated size gives about a third of the total work done. See **[Honest assessment](#honest-assessment-2026-10-05)** for what the numbers don't show.
 
@@ -40,7 +40,7 @@ Read this before choosing work. The feature table above counts what exists; this
 
 | Dimension | State | In one line |
 |---|---|---|
-| Feature count | 51.2% shipped (P0 88%, P1 53%, P2 9%, P3 2%) | A typical viewer, annotator, form-filler or page organizer is mostly covered |
+| Feature count | 51.0% shipped (P0 88%, P1 53%, P2 8%, P3 2%) | A typical viewer, annotator, form-filler or page organizer is mostly covered |
 | Effort | ≈ 30–35% | The remaining work is the hardest: M2 15%, M7 17%, M11 18%, M12 23%, M14 0% |
 | Foundations | Weakest | Rendering is still the bootstrap `hayro`; the inspector is `lopdf`; 18 vendored patches carried |
 | Robustness | Early beta | Each 15-minute fuzz run found new out-of-memory crashes or hangs until 2026-10-05 |
@@ -53,7 +53,7 @@ Read this before choosing work. The feature table above counts what exists; this
 |---|---|---|
 | A Core | 75% | Parser, repair, encryption, incremental saves. Missing: lazy loading (`ByteSource`), own image codecs, PDF 2.0 extras, Arlington validation |
 | F Forms | 71% | Filling, authoring, AF scripts, sandboxed JavaScript, data exchange. Missing: XFA, wider JavaScript object model |
-| E Comments | 74% | Markup types with appearances, XFDF/FDF, summaries, calibrated 2D measuring. Missing: replace-text proposals, summary layouts |
+| E Comments | 71% | Markup types with appearances, XFDF/FDF, summaries, calibrated 2D measuring (single-unit decimal scales). Missing: replace-text proposals, summary layouts, compound/fractional measurement formats |
 | M Accessibility | 62% | Checker (all 32 rules). Missing: autotag, Tags/Order/Content panels, Reading Order tool, keyboard-only operation |
 | B View | 55% | Shell, find, panels, tiles, web build. **Rendering is borrowed (`hayro`)**, so the 7 rendering P0s are only partial |
 | D Organize | 55% | Pages, combine, split, bookmarks, labels. Missing: replace pages, transitions |
@@ -106,7 +106,7 @@ Hours are for a single agent (low–high). "Done" is the estimated fraction of t
 | M14 | 1.0 polish: performance, localization, installers | 120–250 | 5% | 115–240 | Done: PhotoCraft's translation system (`i18n/`: TSV catalogs, `tl!`, command-id and plural entries, system-language detection, strict catalog tests); every dialog, panel and notice goes through `tl!`; Japanese, Traditional Chinese and Simplified Chinese catalogs have ≈1,800 entries each; Simplified Chinese coverage is checked against the UI source; Czech and Brazilian Portuguese for menus. Missing: more catalogs filled in, Windows language detection, installers, performance budgets |
 | | **Total (original plan sizing)** | **2,085–3,840** | **≈ 35%** | **≈ 1,350–2,500 at the planned rate; ≈ 600–1,100 at the measured rate** | |
 
-**Overall progress: about 30–35% of the effort (51.2% of features shipped).** The viewer and the core are far ahead of the editing features, because the viewer was built first so progress could be seen; rendering itself is still borrowed from `hayro`. See [Honest assessment](#honest-assessment-2026-10-05).
+**Overall progress: about 30–35% of the effort (51.0% of features shipped).** The viewer and the core are far ahead of the editing features, because the viewer was built first so progress could be seen; rendering itself is still borrowed from `hayro`. See [Honest assessment](#honest-assessment-2026-10-05).
 
 ## Critical path
 
@@ -129,6 +129,7 @@ Newest first. One line per session: the date, what moved, and the new overall pe
 
 - **2026-10-08 (M14, Simplified Chinese):** Added 208 translations, bringing the catalog from 1,625 to 1,833 entries. PhotoCraft-style coverage checks protect registered commands, All tools labels and UI `tl!` literals; generated history and diagnostic regressions preserve user values. Chinese font delivery remains incomplete: the release-pinned craft-fonts input has no Hans face and the web build only embeds the Japanese UI face (see #112 and #140). Localization remains partial; overall ≈ 30–35% (unchanged).
 
+- **2026-10-07 (community, #208):** Measure: distance, perimeter and area annotations (standard LineDimension/PolyLineDimension/PolygonDimension with rectilinear /Measure), persistent viewport scales with two-point calibration, vector snapping (endpoints, midpoints, intersections, paths) through nested forms, live readings, CSV export, and eight `measure_*` agent tools. Hardened on landing: snap extraction caps segments and snap targets page-wide and skips undecodable streams and over-deep `q` instead of failing; unsupported imported measurements (compound ft-in, fractional, invalid geometry) are listed as unsupported rather than failing the list; non-ASCII units ("m²") are allowed and rendered in WinAnsi; a closing duplicate polygon vertex counts as closed. Distance and scale are partial (single-unit decimal formats only; Acrobat interop untested). 51.0% shipped; ≈ 30–35% effort.
 - **2026-10-07 (community, #190):** Create PDF from Images offers embedded resolution, 72 DPI, or custom DPI (1–1200) without resampling. The engine and doc_create share the choice; Windows image context menus open the chooser through --create-images. Overall estimate unchanged (about 30–35%).
 
 - **2026-10-08 (community):** Cut and stack in Print > Multiple: single-sided n-up sheets can be cut into cell piles and restacked in selected page order, with aligned gutter marks and blanks kept in their cells. Available through doc_print; duplex is refused. Grid-size overflow returns an error. No change to the parity count or the overall estimate (about 30–35%).
@@ -220,4 +221,3 @@ Newest first. One line per session: the date, what moved, and the new overall pe
   - Overall ≈ 3–4%.
 - **2026-09-30 (session 1):** planning complete; viewer vertical slice.
 
-- 2026-10-08: M12 measurement workflow: distance, perimeter and area annotations, persistent viewport scales, two-point calibration, vector snapping, live readings and CSV export; engine and automation APIs with synthetic and UI control tests. Imported compound/fractional scales and geospatial measuring remain unsupported.

@@ -58,7 +58,11 @@ pub struct MeasureView {
     pub rect: [f64; 4],
     pub label: String,
     seeded_page: Option<usize>,
-    paths: Option<(usize, u64, measure::snap::Geometry)>,
+    /// Snapping geometry (or why it failed) per (page, edit generation): extraction is not
+    /// repeated on every hover frame.
+    paths: Option<(usize, u64, Result<measure::snap::Geometry, String>)>,
+    /// Saved measurements per edit generation, for the panel.
+    listing: Option<(u64, Result<measure::Listing, String>)>,
 }
 impl Default for MeasureView {
     fn default() -> Self {
@@ -82,6 +86,7 @@ impl Default for MeasureView {
             label: String::new(),
             seeded_page: None,
             paths: None,
+            listing: None,
         }
     }
 }
@@ -106,7 +111,9 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, doc: &Document, v
         state.cancel();
         state.tool = Some(tool);
     }
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // Keys belong to a focused text field (the label, unit or viewport name) when there is one.
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    if !typing && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.cancel();
     }
     let screen = |p: Point| {
@@ -123,15 +130,17 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, doc: &Document, v
         let mut point = [f64::from(x), f64::from(y)];
         if state.snap_enabled {
             if state.paths.as_ref().is_none_or(|(p, g, _)| *p != page || *g != doc.edit_generation()) {
-                match doc.measurement_paths(page) {
-                    Ok(paths) => state.paths = Some((page, doc.edit_generation(), paths)),
-                    Err(e) => state.error = Some(e),
-                }
+                state.paths = Some((page, doc.edit_generation(), doc.measurement_paths(page)));
             }
             let pixels_per_unit = (xf.rect.width() / xf.pw).max(1e-6);
-            if let Some((_, _, paths)) = &state.paths {
+            if let Some((_, _, Err(e))) = &state.paths {
+                state.error = Some(e.clone());
+            }
+            if let Some((_, _, Ok(paths))) = &state.paths {
                 if paths.truncated {
                     state.error = Some(tl!("This drawing exceeds the snapping limit; only the first paths are used.").into());
+                } else if paths.unreadable > 0 {
+                    state.error = Some(tl!("Some page content couldn't be read; snapping uses the rest.").into());
                 }
                 let tolerance = doc
                     .measurement_to_user(page, [f64::from(vx) + state.sensitivity / f64::from(pixels_per_unit), f64::from(vy)])
@@ -182,10 +191,10 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, doc: &Document, v
         }
     }
     if state.page == Some(page) && !state.points.is_empty() {
-        if (resp.double_clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter))) && matches!(tool, Tool::Perimeter | Tool::Area) {
+        if (resp.double_clicked() || !typing && ui.input(|i| i.key_pressed(egui::Key::Enter))) && matches!(tool, Tool::Perimeter | Tool::Area) {
             finish(state, &mut view.pending_edit, doc, page, tool, author);
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
+        if !typing && ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
             state.points.pop();
         }
         let mut points = state.points.clone();
@@ -284,8 +293,10 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
     let Some(doc) = app.session.get(id) else { return };
     let page = app.views[index].current;
     let info = doc.info.pages.get(page).cloned();
-    let measurements = doc.measurements();
     let state = &mut app.views[index].measure;
+    if state.listing.as_ref().is_none_or(|(g, _)| *g != doc.edit_generation()) {
+        state.listing = Some((doc.edit_generation(), doc.measurements()));
+    }
     if state.seeded_page != Some(page) {
         state.seeded_page = Some(page);
         if let (Ok(a), Ok(b)) = (doc.measurement_to_user(page, [0.0, 0.0]), doc.measurement_to_user(page, [72.0, 0.0]))
@@ -339,7 +350,7 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
     ui.horizontal(|ui| {
         ui.label(tl!("Unit"));
         ui.add(egui::TextEdit::singleline(&mut state.unit).desired_width(64.0).char_limit(12));
-        ui.add(egui::DragValue::new(&mut state.precision).range(0..=6).prefix(tl!("Decimals ")));
+        ui.add(egui::DragValue::new(&mut state.precision).range(0..=6).prefix(format!("{} ", tl!("Decimals"))));
     });
     if ui.button(tl!("Calibrate from two points")).clicked() {
         tool = Some(Tool::Calibrate);
@@ -363,18 +374,25 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
     }
     ui.separator();
     let mut select = None;
-    match measurements {
-        Ok(measurements) => {
-            ui.label(format!("{}: {}", tl!("Saved measurements"), measurements.len()));
+    match state.listing.as_ref().map(|(_, l)| l) {
+        None => {}
+        Some(Ok(listing)) => {
+            ui.label(format!("{}: {}", tl!("Saved measurements"), listing.measurements.len()));
+            if !listing.unsupported.is_empty() {
+                let reasons: Vec<String> =
+                    listing.unsupported.iter().map(|u| format!("{} {}: {}", tl!("Page"), u.page.saturating_add(1), u.reason)).collect();
+                ui.colored_label(Color32::from_rgb(190, 120, 30), format!("{}: {}", tl!("Unsupported measurements"), listing.unsupported.len()))
+                    .on_hover_text(reasons.join("\n"));
+            }
             egui::ScrollArea::vertical().id_salt("measurement-list").max_height(140.0).show(ui, |ui| {
-                for m in measurements {
-                    if ui.button(format!("{} {}: {} {}", tl!("Page"), m.page + 1, m.reading.label, m.label)).clicked() {
-                        select = Some((m.page, m.index, m.reading, m.scale));
+                for m in &listing.measurements {
+                    if ui.button(format!("{} {}: {} {}", tl!("Page"), m.page.saturating_add(1), m.reading.label, m.label)).clicked() {
+                        select = Some((m.page, m.index, m.reading.clone(), m.scale.clone()));
                     }
                 }
             });
         }
-        Err(e) => {
+        Some(Err(e)) => {
             ui.colored_label(Color32::from_rgb(190, 50, 50), e);
         }
     }
@@ -429,10 +447,17 @@ pub(crate) fn command(app: &mut PdfCraftApp, id: &str) {
 }
 fn export_csv(app: &mut PdfCraftApp) {
     let Some((_, id)) = app.active_ids() else { return };
-    let result = app.session.get(id).ok_or_else(|| "no such document".to_string()).and_then(|d| d.measurements()).map(|m| measure::csv(&m));
+    let result = app.session.get(id).ok_or_else(|| "no such document".to_string()).and_then(|d| d.measurements());
     match result {
         Err(e) => app.notify(&e),
-        Ok(csv) => {
+        Ok(listing) => {
+            let csv = measure::csv(&listing.measurements);
+            if !listing.unsupported.is_empty() {
+                app.notify(crate::i18n::fmt(
+                    tl!("{n} measurements use an unsupported format and are left out."),
+                    &[("n", &listing.unsupported.len().to_string())],
+                ));
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(path) = app
                 .export_dir_override

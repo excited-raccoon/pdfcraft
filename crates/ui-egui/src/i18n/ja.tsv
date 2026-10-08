@@ -1848,7 +1848,7 @@
 	Paths	パス
 	Sensitivity	感度
 	Unit	単位
-	Decimals 	小数桁数
+	Decimals	小数桁数
 	Calibrate from two points	2点で校正
 	Entire page	ページ全体
 	Viewport rectangle in page points (x, y, width, height)	ページ上の矩形（ポイント単位：x、y、幅、高さ）
@@ -1861,5 +1861,9 @@
 	Intersection	交点
 	Path	パス
 	This drawing exceeds the snapping limit; only the first paths are used.	図面がスナップの上限を超えているため、最初のパスのみを使用します。
+	Some page content couldn't be read; snapping uses the rest.	ページの内容の一部を読み取れませんでした。残りの内容にスナップします。
+	Unsupported measurements	未対応の測定
+	Label	ラベル
+	{n} measurements use an unsupported format and are left out.	{n} 件の測定は未対応の形式のため除外されました。
 	This area has too many overlapping paths; intersection snapping is limited.	この領域は重なるパスが多すぎるため、交点へのスナップを制限します。
 	This measurement needs at least {n} points.	この測定には少なくとも{n}点が必要です。

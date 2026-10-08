@@ -2,10 +2,13 @@ use super::*;
 use pdfcraft_cos::{SaveOptions, write_full};
 use std::sync::Arc;
 fn fixture(content: &str, attrs: &str, extra: &[&str]) -> Document {
+    fixture_with("4 0 R", content, attrs, extra)
+}
+fn fixture_with(contents: &str, content: &str, attrs: &str, extra: &[&str]) -> Document {
     let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>".into(),
-        format!("<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /XObject << /Nested 5 0 R >> >> {attrs} >>"),
+        format!("<< /Type /Page /Parent 2 0 R /Contents {contents} /Resources << /XObject << /Nested 5 0 R >> >> {attrs} >>"),
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
     ];
     objects.extend(extra.iter().map(|s| s.to_string()));
@@ -69,7 +72,7 @@ fn viewport_precedence_first_point_user_unit_and_roundtrip() {
     add(&mut d, &m, &Meta { date: None, id: "measure".into() }).unwrap();
     let bytes = write_full(&d, &SaveOptions::default()).unwrap();
     let reopened = Document::open(Arc::new(bytes)).unwrap();
-    let measurements = list(&reopened).unwrap();
+    let measurements = list(&reopened).measurements;
     close(measurements[0].reading.value, 750.0);
     assert_eq!(measurements[0].id, "measure");
     assert_eq!(scale_at(&reopened, 0, [25.0, 35.0]).unwrap().precision, 4);
@@ -85,7 +88,7 @@ fn standard_annotations_captions_restyle_move_and_unknown_keys() {
     ] {
         add(&mut d, &m, &meta).unwrap();
     }
-    assert_eq!(list(&d).unwrap().iter().map(|m| m.reading.value).collect::<Vec<_>>(), vec![10.0, 14.0, 24.0]);
+    assert_eq!(list(&d).measurements.iter().map(|m| m.reading.value).collect::<Vec<_>>(), vec![10.0, 14.0, 24.0]);
     let (r, dict) = annot(&d, 0, 0).unwrap();
     assert_eq!(dict.name(b"IT"), Some(&b"LineDimension"[..]));
     d.update_dict(r, |d| d.set(b"VendorKey".to_vec(), Object::Int(42))).unwrap();
@@ -98,8 +101,8 @@ fn standard_annotations_captions_restyle_move_and_unknown_keys() {
     let stream = String::from_utf8(stream.decoded().unwrap()).unwrap();
     assert!(stream.contains("(10.000 m) Tj"), "{stream}");
     pdfcraft_annot::move_annotation(&mut d, 0, 0, 50.0, 60.0, &meta).unwrap();
-    assert_eq!(list(&d).unwrap()[0].points, vec![[50.0, 60.0], [53.0, 64.0]]);
-    close(list(&d).unwrap()[0].reading.value, 10.0);
+    assert_eq!(list(&d).measurements[0].points, vec![[50.0, 60.0], [53.0, 64.0]]);
+    close(list(&d).measurements[0].reading.value, 10.0);
 }
 #[test]
 fn rejects_invalid_geometry_and_unsupported_scales() {
@@ -160,7 +163,7 @@ fn measurement_csv_quotes_newlines_and_blocks_formula_cells() {
     m.label = "=SUM(1,2)\n\"room\"".into();
     m.author = "  @cmd".into();
     add(&mut d, &m, &Meta::default()).unwrap();
-    let csv = csv(&list(&d).unwrap());
+    let csv = csv(&list(&d).measurements);
     assert!(csv.contains("\"'=SUM(1,2)\n\"\"room\"\"\""));
     assert!(csv.contains("\"'  @cmd\""));
     assert!(csv.starts_with("Page,Index,Type,Value"));
@@ -205,5 +208,114 @@ fn imported_measurement_appearance_is_not_silently_replaced() {
     .unwrap();
     assert!(pdfcraft_annot::set_appearance(&mut d, r).is_err());
     assert_eq!(annot(&d, 0, 0).unwrap().1.get(b"AP"), Some(&original));
-    close(list(&d).unwrap()[0].reading.value, 100.0);
+    close(list(&d).measurements[0].reading.value, 100.0);
+}
+
+#[test]
+fn degenerate_and_dense_paths_keep_snap_targets_bounded() {
+    // Rejected (zero-length) segments record no endpoints or midpoints at all.
+    let d = fixture(&"0 0 0 0 re f ".repeat(100_000), "", &[]);
+    let g = snap::geometry(&d, 0).unwrap();
+    assert!(g.segments.is_empty() && g.endpoints.is_empty() && g.midpoints.is_empty(), "{} {}", g.endpoints.len(), g.midpoints.len());
+    // Every paint drains into the page geometry; the page-wide target cap still holds.
+    let d = fixture(&"0 0 1 1 re f ".repeat(30_000), "", &[]);
+    let g = snap::geometry(&d, 0).unwrap();
+    assert!(g.truncated);
+    assert!(g.endpoints.len() + g.midpoints.len() <= 40_000 + 12, "{}", g.endpoints.len() + g.midpoints.len());
+    assert!(g.segments.len() <= 20_000 + 4);
+    // Unpainted curves and lines are capped too.
+    let d = fixture(&"0 0 m 5 9 1 9 7 0 c 0 3 l ".repeat(30_000), "", &[]);
+    let g = snap::geometry(&d, 0).unwrap();
+    assert!(g.truncated && g.endpoints.is_empty());
+}
+#[test]
+fn deep_graphics_state_and_unreadable_streams_are_skipped_not_fatal() {
+    let d = fixture(&format!("0 0 m 10 0 l S {}", "q ".repeat(300)), "", &[]);
+    let g = snap::geometry(&d, 0).unwrap();
+    assert!(g.truncated);
+    assert_eq!(g.segments.len(), 1);
+    // An unsupported filter cannot be decoded at all (corrupt Flate is decoded tolerantly).
+    let broken = "<< /Length 10 /Filter /NoSuchDecode >>\nstream\nnot-zlib!!\nendstream";
+    let d = fixture_with("[4 0 R 5 0 R]", "0 0 m 10 0 l S", "", &[broken]);
+    let g = snap::geometry(&d, 0).unwrap();
+    assert_eq!(g.unreadable, 1);
+    assert_eq!(g.segments.len(), 1);
+    let d = fixture_with("5 0 R", "", "", &[broken]);
+    assert_eq!(snap::geometry(&d, 0).unwrap().unreadable, 1);
+}
+#[test]
+fn unsupported_measurements_are_reported_not_fatal() {
+    let mut d = fixture("", "", &[]);
+    add(&mut d, &new(Kind::Distance, vec![[0.0, 0.0], [3.0, 4.0]]), &Meta::default()).unwrap();
+    add(&mut d, &new(Kind::Distance, vec![[10.0, 0.0], [13.0, 4.0]]), &Meta::default()).unwrap();
+    // An imported compound feet-and-inches format (two NumberFormat dictionaries).
+    let (r, _) = annot(&d, 0, 1).unwrap();
+    let format = |unit: &str, c: f64| {
+        let mut f = Dict::new();
+        f.set(b"Type".to_vec(), Object::name("NumberFormat"));
+        f.set(b"U".to_vec(), PdfString::text(unit));
+        f.set(b"C".to_vec(), Object::Real(c));
+        Object::Dict(f)
+    };
+    d.update_dict(r, |a| {
+        let mut m = Scale::default().dictionary().unwrap();
+        m.set(b"D".to_vec(), Object::Array(vec![format("ft", 1.0 / 864.0), format("in", 12.0)]));
+        a.set(b"Measure".to_vec(), Object::Dict(m));
+    })
+    .unwrap();
+    let listing = list(&d);
+    assert_eq!(listing.measurements.len(), 1);
+    assert_eq!(listing.unsupported.len(), 1);
+    assert_eq!((listing.unsupported[0].page, listing.unsupported[0].index), (0, 1));
+    assert!(listing.unsupported[0].reason.contains("compound"), "{}", listing.unsupported[0].reason);
+    // Invalid geometry on an imported annotation is reported the same way.
+    let (r, _) = annot(&d, 0, 0).unwrap();
+    d.update_dict(r, |a| a.set(b"L".to_vec(), nums([0.0, 0.0, f64::NAN, 1.0]))).unwrap();
+    let listing = list(&d);
+    assert!(listing.measurements.is_empty());
+    assert_eq!(listing.unsupported.len(), 2);
+}
+#[test]
+fn non_ascii_units_roundtrip_and_render_in_win_ansi() {
+    let mut d = fixture("", "", &[]);
+    let mut m = new(Kind::Area, vec![[0.0, 0.0], [3.0, 0.0], [3.0, 4.0]]);
+    m.scale = Scale { area_unit: "m²".into(), ..Scale::new(2.0, "m", 1).unwrap() };
+    add(&mut d, &m, &Meta::default()).unwrap();
+    let bytes = write_full(&d, &SaveOptions::default()).unwrap();
+    let d = Document::open(Arc::new(bytes)).unwrap();
+    let listing = list(&d);
+    assert!(listing.unsupported.is_empty(), "{:?}", listing.unsupported);
+    assert_eq!(listing.measurements[0].scale.area_unit, "m²");
+    assert_eq!(listing.measurements[0].reading.label, "24.0 m²");
+    let (_, dict) = annot(&d, 0, 0).unwrap();
+    let ap = d.resolve(dict.get(b"AP").unwrap());
+    let normal = d.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
+    let Object::Stream(stream) = normal.as_ref() else { panic!("appearance missing") };
+    let data = stream.decoded().unwrap();
+    // "²" is WinAnsi 0xB2, written as a raw byte rather than a UTF-8 replacement character.
+    assert!(data.windows(5).any(|w| w == b"0 m\xb2)"), "{}", String::from_utf8_lossy(&data));
+    assert!(!data.windows(3).any(|w| w == "\u{fffd}".as_bytes()));
+    assert!(Scale::new(1.0, "m\n", 2).is_err());
+    assert!(Scale::new(1.0, &"x".repeat(25), 2).is_err());
+}
+#[test]
+fn closed_polygon_with_repeated_first_vertex_is_not_self_intersecting() {
+    let mut d = fixture("", "", &[]);
+    let points = vec![[0.0, 0.0], [3.0, 0.0], [3.0, 4.0], [0.0, 4.0], [0.0, 0.0]];
+    add(&mut d, &new(Kind::Area, points.clone()), &Meta::default()).unwrap();
+    let listing = list(&d);
+    assert!(listing.unsupported.is_empty(), "{:?}", listing.unsupported);
+    close(listing.measurements[0].reading.value, 48.0);
+    assert_eq!(listing.measurements[0].points, points);
+    // A closing duplicate doesn't turn too few vertices into a polygon.
+    assert!(add(&mut d, &new(Kind::Area, vec![[0.0, 0.0], [3.0, 0.0], [0.0, 0.0]]), &Meta::default()).is_err());
+}
+#[test]
+fn indirect_viewport_array_stays_indirect() {
+    let mut d = fixture("", "/VP 5 0 R", &["[]"]);
+    set_scale(&mut d, 0, [0.0, 0.0, 100.0, 100.0], "plan", &Scale::new(1.0, "m", 2).unwrap()).unwrap();
+    let page = crate::page(&d, 0).unwrap();
+    let r = page.dict.get(b"VP").and_then(Object::as_ref).expect("VP stays a reference");
+    assert_eq!(d.get(r).as_array().map(Vec::len), Some(1));
+    close(scale_at(&d, 0, [50.0, 50.0]).unwrap().x, 1.0);
 }

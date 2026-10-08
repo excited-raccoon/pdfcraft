@@ -1940,6 +1940,8 @@ fn measurements_calibrate_draw_save_reopen_and_export() {
     }
     let all = ok(&mut a, "measure_list", json!({"doc":doc}));
     assert_eq!(all["count"], 3);
+    assert_eq!(all["unsupported"], json!([]));
+    assert_eq!(all["truncated"], false);
     for (m, value) in all["measurements"].as_array().unwrap().iter().zip([10.0, 14.0, 48.0]) {
         assert!((m["reading"]["value"].as_f64().unwrap() - value).abs() < 1e-6);
         assert_eq!(m["page"], 1);
@@ -1956,7 +1958,8 @@ fn measurements_calibrate_draw_save_reopen_and_export() {
     let reopened = ok(&mut a, "doc_open", json!({"path":"measured.pdf"}))["doc"].as_u64().unwrap();
     let after = ok(&mut a, "measure_list", json!({"doc":reopened}));
     assert_eq!(after["measurements"], all["measurements"]);
-    ok(&mut a, "measure_export", json!({"doc":reopened,"out":"measurements.csv"}));
+    let exported = ok(&mut a, "measure_export", json!({"doc":reopened,"out":"measurements.csv"}));
+    assert_eq!((exported["count"].as_u64(), exported["unsupported"].as_u64()), (Some(3), Some(0)));
     let csv = std::fs::read_to_string(dir.join("measurements.csv")).unwrap();
     assert!(csv.contains("area,48,\"m^2\",\"Room, \"\"A\"\"\""), "{csv}");
     assert!(a.call("measure_export", &json!({"doc":doc,"out":"../outside.csv"})).is_err());

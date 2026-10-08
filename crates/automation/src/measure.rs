@@ -51,8 +51,9 @@ impl Automation {
     pub(crate) fn measurement_list(&self, a: &Args) -> Result<Value> {
         let doc = self.doc(a)?;
         let all = doc.measurements().map_err(failed)?;
-        let only = a.opt_int("page")?.map(|n| (n.max(1) - 1) as usize);
+        let only = a.opt_int("page")?.map(|n| usize::try_from(n.max(1).saturating_sub(1)).unwrap_or(usize::MAX));
         let measurements: Vec<Value> = all
+            .measurements
             .iter()
             .filter(|m| only.is_none_or(|p| m.page == p))
             .map(|m| -> Result<Value> {
@@ -64,7 +65,13 @@ impl Automation {
                 Ok(v)
             })
             .collect::<Result<_>>()?;
-        Ok(json!({"count":measurements.len(),"measurements":measurements}))
+        let unsupported: Vec<Value> = all
+            .unsupported
+            .iter()
+            .filter(|u| only.is_none_or(|p| u.page == p))
+            .map(|u| json!({"page":u.page.saturating_add(1),"index":u.index.saturating_add(1),"reason":u.reason}))
+            .collect();
+        Ok(json!({"count":measurements.len(),"measurements":measurements,"unsupported":unsupported,"truncated":all.truncated}))
     }
     pub(crate) fn measurement_scale(&mut self, a: &Args) -> Result<Value> {
         let page = self.page(a)?;
@@ -129,10 +136,10 @@ impl Automation {
         Ok(json!({"snap":snap,"truncated":geometry.truncated,"intersection_limited":intersection_limited,"segments":geometry.segments.len()}))
     }
     pub(crate) fn measurement_export(&self, a: &Args) -> Result<Value> {
-        let measurements = self.doc(a)?.measurements().map_err(failed)?;
-        let csv = measure::csv(&measurements);
+        let all = self.doc(a)?.measurements().map_err(failed)?;
+        let csv = measure::csv(&all.measurements);
         let target = self.resolve(a.str("out")?, true)?;
         crate::write_atomic(&target, csv.as_bytes())?;
-        Ok(json!({"path":target,"count":measurements.len()}))
+        Ok(json!({"path":target,"count":all.measurements.len(),"unsupported":all.unsupported.len(),"truncated":all.truncated}))
     }
 }

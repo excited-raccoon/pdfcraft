@@ -6,13 +6,18 @@ use serde::Serialize;
 use std::collections::HashSet;
 
 const MAX_SEGMENTS: usize = 20_000;
+/// Endpoints and midpoints together, across the whole page.
+const MAX_TARGETS: usize = 2 * MAX_SEGMENTS;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
     pub segments: Vec<[Point; 2]>,
     pub endpoints: Vec<Point>,
     pub midpoints: Vec<Point>,
+    /// A limit stopped extraction early (segments, targets, bytes, streams, nesting).
     pub truncated: bool,
+    /// Content streams that couldn't be decoded and were skipped.
+    pub unreadable: usize,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -116,20 +121,33 @@ impl Geometry {
         }
         Ok(best)
     }
-    fn segment(&mut self, a: Point, b: Point) {
+    fn targets(&self) -> usize {
+        self.endpoints.len().saturating_add(self.midpoints.len())
+    }
+    /// Whether the segment was accepted (finite, non-degenerate and within the cap).
+    fn segment(&mut self, a: Point, b: Point) -> bool {
         if self.segments.len() >= MAX_SEGMENTS {
             self.truncated = true;
-            return;
+            return false;
         }
         if check_points(&[a, b]).is_ok() && distance(a, b) > 1e-9 {
             self.segments.push([a, b]);
+            return true;
         }
+        false
+    }
+    /// Snap targets are recorded only for accepted geometry, and are capped.
+    fn target(&mut self, ends: [Point; 2], mid: Point) {
+        if self.targets() >= MAX_TARGETS {
+            self.truncated = true;
+            return;
+        }
+        self.endpoints.extend(ends);
+        self.midpoints.push(mid);
     }
     fn edge(&mut self, a: Point, b: Point) {
-        self.segment(a, b);
-        if self.endpoints.len() < MAX_SEGMENTS * 2 {
-            self.endpoints.extend([a, b]);
-            self.midpoints.push([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]);
+        if self.segment(a, b) {
+            self.target([a, b], [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]);
         }
     }
     fn curve(&mut self, points: [Point; 4], depth: usize) {
@@ -182,9 +200,14 @@ impl Walker<'_> {
                         self.geometry.truncated = true;
                         break;
                     }
-                    let data = s.decoded_within(remaining).map_err(|e| invalid(&format!("cannot read snapping paths: {e}")))?;
-                    joined.extend(data);
-                    joined.push(b'\n');
+                    // An undecodable part is skipped; the rest of the page still snaps.
+                    match s.decoded_within(remaining) {
+                        Ok(data) => {
+                            joined.extend(data);
+                            joined.push(b'\n');
+                        }
+                        Err(_) => self.geometry.unreadable = self.geometry.unreadable.saturating_add(1),
+                    }
                 }
             }
             return self.ops(&joined, resources, initial, depth);
@@ -195,8 +218,13 @@ impl Walker<'_> {
             self.geometry.truncated = true;
             return Ok(());
         }
-        let data = stream.decoded_within(remaining).map_err(|e| invalid(&format!("cannot read snapping paths: {e}")))?;
-        self.ops(&data, resources, initial, depth)
+        match stream.decoded_within(remaining) {
+            Ok(data) => self.ops(&data, resources, initial, depth),
+            Err(_) => {
+                self.geometry.unreadable = self.geometry.unreadable.saturating_add(1);
+                Ok(())
+            }
+        }
     }
     fn ops(&mut self, data: &[u8], resources: &Dict, initial: Matrix, depth: usize) -> Result<()> {
         self.bytes = self.bytes.saturating_add(data.len());
@@ -211,7 +239,9 @@ impl Walker<'_> {
             [x, y]
         };
         for op in parse(data).ops {
-            if self.geometry.segments.len() + path.segments.len() >= MAX_SEGMENTS {
+            if self.geometry.segments.len().saturating_add(path.segments.len()) >= MAX_SEGMENTS
+                || self.geometry.targets().saturating_add(path.targets()) >= MAX_TARGETS
+            {
                 self.geometry.truncated = true;
                 break;
             }
@@ -220,7 +250,9 @@ impl Walker<'_> {
                     if stack.len() < 256 {
                         stack.push(matrix);
                     } else {
-                        return Err(invalid("graphics state stack is too deep for snapping"));
+                        // Later transforms can't be tracked reliably; keep what was found.
+                        self.geometry.truncated = true;
+                        break;
                     }
                 }
                 "Q" => {
@@ -260,9 +292,11 @@ impl Walker<'_> {
                         if let Some([a, b, c, d]) = curve
                             && check_points(&[a, b, c, d]).is_ok()
                         {
+                            let before = path.segments.len();
                             path.curve([a, b, c, d], 0);
-                            path.endpoints.extend([a, d]);
-                            path.midpoints.push([(a[0] + 3.0 * b[0] + 3.0 * c[0] + d[0]) / 8.0, (a[1] + 3.0 * b[1] + 3.0 * c[1] + d[1]) / 8.0]);
+                            if path.segments.len() > before {
+                                path.target([a, d], [(a[0] + 3.0 * b[0] + 3.0 * c[0] + d[0]) / 8.0, (a[1] + 3.0 * b[1] + 3.0 * c[1] + d[1]) / 8.0]);
+                            }
                             current = Some(d);
                         }
                     }
@@ -300,6 +334,7 @@ impl Walker<'_> {
                     start = None;
                 }
                 "n" => {
+                    self.geometry.truncated |= path.truncated;
                     path = Geometry::default();
                     current = None;
                     start = None;
@@ -348,6 +383,7 @@ pub fn geometry(doc: &Document, page_index: usize) -> Result<Geometry> {
     let empty = Dict::new();
     let resources = resources.as_ref().and_then(|o| o.as_dict()).unwrap_or(&empty);
     let mut walker = Walker { doc, geometry: Geometry::default(), seen: HashSet::new(), bytes: 0, streams: 0 };
+    // Extraction is lenient: limits and unreadable streams are reported in the geometry.
     if let Some(contents) = p.dict.get(b"Contents") {
         walker.walk(contents, resources, Matrix::IDENTITY, 0)?;
     }

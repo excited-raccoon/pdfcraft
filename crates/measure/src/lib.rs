@@ -1,5 +1,6 @@
-//! Calibrated 2D measurements in PDF user space (ISO 32000-1 §12.9).
-//! Viewports and annotations carry standard rectilinear /Measure dictionaries.
+//! Calibrated 2D measurements in PDF user space (ISO 32000-2 §12.9, measurement properties).
+//! Viewports and annotations carry standard rectilinear /Measure dictionaries; the
+//! annotations use the measurement intents of line, polygon and polyline annotations (§12.5.6).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod snap;
@@ -56,7 +57,8 @@ impl Kind {
 }
 
 /// Conversion from PDF user units to real-world units. Y can use a different scale.
-/// Distance and area conversion factors are relative to X, per Table 262.
+/// Distance and area conversion factors are relative to X (the rectilinear measure
+/// dictionary, ISO 32000-2 §12.9).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Scale {
     pub x: f64,
@@ -117,9 +119,11 @@ impl Scale {
         if self.precision > 6 {
             return Err(invalid("precision must be between 0 and 6 decimal places"));
         }
+        // Units are text strings, so non-ASCII labels such as "m²" are allowed.
         for s in [&self.unit, &self.area_unit] {
-            if s.is_empty() || s.len() > 24 || !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '/' | '^' | '2' | '\'' | '"')) {
-                return Err(invalid("unit labels must be 1 to 24 plain characters"));
+            let n = s.chars().count();
+            if s.trim().is_empty() || n > 24 || s.chars().any(char::is_control) {
+                return Err(invalid("unit labels must be 1 to 24 printable characters"));
             }
         }
         if self.ratio.len() > 256 || self.ratio.chars().any(char::is_control) {
@@ -268,8 +272,17 @@ pub struct NewMeasurement {
     pub label: String,
     pub author: String,
 }
+/// An area's vertices without a repeated closing vertex (last == first), which some
+/// writers include; the closing edge is implicit.
+pub fn open_polygon(points: &[Point]) -> &[Point] {
+    match points {
+        [first, rest @ .., last] if rest.len() >= 2 && distance(*first, *last) < 1e-6 => points.get(..points.len() - 1).unwrap_or(points),
+        _ => points,
+    }
+}
 fn validate_geometry(kind: Kind, points: &[Point]) -> Result<()> {
     check_points(points)?;
+    let points = if kind == Kind::Area { open_polygon(points) } else { points };
     match kind {
         Kind::Distance if points.len() != 2 => return Err(invalid("distance needs exactly two points")),
         Kind::Perimeter if points.len() < 2 => return Err(invalid("perimeter needs at least two points")),
@@ -368,8 +381,41 @@ pub struct Measurement {
     pub scale: Scale,
     pub reading: Reading,
 }
-pub fn list(doc: &Document) -> Result<Vec<Measurement>> {
-    let mut out = Vec::new();
+/// A measurement annotation that couldn't be read (unsupported scale format, invalid
+/// geometry). Its PDF data is left untouched.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Unsupported {
+    pub page: usize,
+    pub index: usize,
+    pub reason: String,
+}
+/// Saved measurements plus the ones that were skipped.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Listing {
+    pub measurements: Vec<Measurement>,
+    pub unsupported: Vec<Unsupported>,
+    /// The annotation limit stopped enumeration early.
+    pub truncated: bool,
+}
+const MAX_ANNOTATIONS: usize = 100_000;
+fn read_measurement(doc: &Document, d: &Dict, kind: Kind, page: usize, index: usize) -> Result<Measurement> {
+    let scale = Scale::read(doc, d.get(b"Measure").ok_or_else(|| invalid("measurement has no scale"))?)?;
+    let key = if kind == Kind::Distance { &b"L"[..] } else { b"Vertices" };
+    let o = doc.resolve(d.get(key).ok_or_else(|| invalid("measurement has no vertices"))?);
+    let a = o.as_array().ok_or_else(|| invalid("invalid measurement vertices"))?;
+    if a.len() % 2 != 0 || a.len() > MAX_POINTS * 2 {
+        return Err(invalid("invalid measurement vertex count"));
+    }
+    let v: Vec<f64> = a.iter().map(|n| doc.resolve(n).as_f64().ok_or_else(|| invalid("invalid vertex"))).collect::<Result<_>>()?;
+    let points: Vec<Point> = v.as_chunks::<2>().0.to_vec();
+    validate_geometry(kind, &points)?;
+    let reading = reading(kind, &points, &scale)?;
+    Ok(Measurement { page, index, id: text(d, b"NM"), author: text(d, b"T"), label: text(d, b"PCMeasureLabel"), points, scale, reading })
+}
+/// Every measurement annotation. One that can't be read is reported in `unsupported`
+/// rather than failing the whole list.
+pub fn list(doc: &Document) -> Listing {
+    let mut out = Listing::default();
     let mut count = 0usize;
     for (page, p) in pdfcraft_model::pages(doc).iter().enumerate() {
         let Some(o) = p.dict.get(b"Annots") else { continue };
@@ -377,8 +423,9 @@ pub fn list(doc: &Document) -> Result<Vec<Measurement>> {
         let Some(arr) = o.as_array() else { continue };
         for (index, a) in arr.iter().enumerate() {
             count = count.saturating_add(1);
-            if count > 100_000 {
-                return Err(invalid("too many annotations to enumerate measurements"));
+            if count > MAX_ANNOTATIONS {
+                out.truncated = true;
+                return out;
             }
             let o = doc.resolve(a);
             let Some(d) = o.as_dict() else { continue };
@@ -388,32 +435,15 @@ pub fn list(doc: &Document) -> Result<Vec<Measurement>> {
                 Some(b"PolygonDimension") => Kind::Area,
                 _ => continue,
             };
-            let scale = Scale::read(doc, d.get(b"Measure").ok_or_else(|| invalid("measurement has no scale"))?)?;
-            let key = if kind == Kind::Distance { &b"L"[..] } else { b"Vertices" };
-            let o = doc.resolve(d.get(key).ok_or_else(|| invalid("measurement has no vertices"))?);
-            let a = o.as_array().ok_or_else(|| invalid("invalid measurement vertices"))?;
-            if a.len() % 2 != 0 || a.len() > MAX_POINTS * 2 {
-                return Err(invalid("invalid measurement vertex count"));
+            match read_measurement(doc, d, kind, page, index) {
+                Ok(m) => out.measurements.push(m),
+                Err(e) => out.unsupported.push(Unsupported { page, index, reason: e.to_string() }),
             }
-            let v: Vec<f64> = a.iter().map(|n| doc.resolve(n).as_f64().ok_or_else(|| invalid("invalid vertex"))).collect::<Result<_>>()?;
-            let points: Vec<Point> = v.as_chunks::<2>().0.to_vec();
-            validate_geometry(kind, &points)?;
-            let reading = reading(kind, &points, &scale)?;
-            out.push(Measurement {
-                page,
-                index,
-                id: text(d, b"NM"),
-                author: text(d, b"T"),
-                label: text(d, b"PCMeasureLabel"),
-                points,
-                scale,
-                reading,
-            });
         }
     }
-    Ok(out)
+    out
 }
-/// Last containing viewport wins, using the first point of the measurement (§12.9).
+/// Last containing viewport wins, using the first point of the measurement (ISO 32000-2 §12.9).
 pub fn scale_at(doc: &Document, page_index: usize, at: Point) -> Result<Scale> {
     check_points(&[at])?;
     let p = page(doc, page_index)?;
@@ -447,7 +477,8 @@ pub fn set_scale(doc: &mut Document, page_index: usize, bbox: [f64; 4], name: &s
         return Err(invalid("viewport needs a positive rectangle and a name of at most 256 bytes"));
     }
     let p = page(doc, page_index)?;
-    let mut list = match p.dict.get(b"VP") {
+    let vp = p.dict.get(b"VP");
+    let mut list = match vp {
         Some(o) => doc.resolve(o).as_array().cloned().ok_or_else(|| invalid("invalid page viewports"))?,
         None => Vec::new(),
     };
@@ -460,7 +491,11 @@ pub fn set_scale(doc: &mut Document, page_index: usize, bbox: [f64; 4], name: &s
     d.set(b"Name".to_vec(), PdfString::text(name));
     d.set(b"Measure".to_vec(), Object::Dict(scale.dictionary()?));
     list.push(Object::Dict(d));
-    doc.update_dict(p.obj, |d| d.set(b"VP".to_vec(), Object::Array(list))).map_err(|e| invalid(&e.to_string()))?;
+    // An indirect /VP array stays indirect (it may be shared); otherwise the page holds it.
+    match vp.and_then(Object::as_ref) {
+        Some(r) => doc.set(r, Object::Array(list)),
+        None => doc.update_dict(p.obj, |d| d.set(b"VP".to_vec(), Object::Array(list))).map_err(|e| invalid(&e.to_string()))?,
+    }
     Ok(())
 }
 pub fn csv(measurements: &[Measurement]) -> String {

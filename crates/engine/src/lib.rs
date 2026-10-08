@@ -257,10 +257,11 @@ impl Document {
         self.editor.as_ref().and_then(|e| pdfcraft_edit::text_blocks(&e.cos, page).ok()).unwrap_or_default()
     }
 
-    /// Saved measurement annotations, calculated from their geometry and PDF scales.
-    pub fn measurements(&self) -> Result<Vec<measure::Measurement>, String> {
+    /// Saved measurement annotations, calculated from their geometry and PDF scales, plus
+    /// the ones that couldn't be read (unsupported formats are skipped, not fatal).
+    pub fn measurements(&self) -> Result<measure::Listing, String> {
         let e = self.editor.as_ref().ok_or("the document can't be read")?;
-        measure::list(&e.cos).map_err(|e| e.to_string())
+        Ok(measure::list(&e.cos))
     }
     pub fn measurement_scale(&self, page: usize, at: measure::Point) -> Result<measure::Scale, String> {
         let e = self.editor.as_ref().ok_or("the document can't be read")?;

@@ -779,14 +779,14 @@ fn measurement_tools_draw_live_calibrate_save_and_export() {
             h.run_steps(3);
         }
     }
-    let measurements = h.state().session.get(doc).unwrap().measurements().unwrap();
+    let measurements = h.state().session.get(doc).unwrap().measurements().unwrap().measurements;
     assert_eq!(measurements.len(), 3);
     for (m, value) in measurements.iter().zip([10.0, 14.0, 48.0]) {
         assert!((m.reading.value - value).abs() < 0.01, "{m:?}");
     }
     ok(&mut h, &c, "ui.command", json!({"id":"edit.undo"}));
     h.run_steps(2);
-    assert_eq!(h.state().session.get(doc).unwrap().measurements().unwrap().len(), 2);
+    assert_eq!(h.state().session.get(doc).unwrap().measurements().unwrap().measurements.len(), 2);
     ok(&mut h, &c, "ui.command", json!({"id":"edit.redo"}));
     h.run_steps(2);
     let dir = std::env::temp_dir().join(format!("pdfcraft-measure-ui-{}", std::process::id()));
