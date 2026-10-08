@@ -1408,7 +1408,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             if view.highlight_fields {
                 for f in form.iter() {
                     let required = f.has(pdfcraft_engine::field_flags::REQUIRED);
-                    for w in f.widgets.iter().filter(|w| w.page == Some(i)) {
+                    for w in f.widgets.iter().filter(|w| w.page == Some(i) && !w.hidden) {
                         let r = w.rect;
                         let sr = xf.user_rect(info, i, [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32]);
                         painter.rect_filled(sr, CornerRadius::same(1), Color32::from_rgba_unmultiplied(0x6E, 0x8E, 0xF5, 48));
@@ -1757,6 +1757,29 @@ fn run_button(app: &mut PdfCraftApp, index: usize, name: &str, action: pdfcraft_
         },
         B::Uri(u) => app.request_document_url(&u, crate::LinkOrigin::Button),
         B::GoTo(p) => app.views[index].go_to_page(p.min(pages.saturating_sub(1))),
+        B::ShowHide { fields, hide } => {
+            let listed = |n: &String| fields.iter().any(|f| n == f || n.starts_with(&format!("{f}.")));
+            // `display.hidden` 1, `display.visible` 0, as a script setting `field.display` would.
+            let changes: Vec<pdfcraft_engine::FieldChange> = app
+                .session
+                .get(app.views[index].id)
+                .map(|d| d.form.iter().filter(|f| listed(&f.name)).map(|f| f.name.clone()).collect::<Vec<_>>())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|name| pdfcraft_engine::FieldChange {
+                    name,
+                    value: None,
+                    read_only: None,
+                    required: None,
+                    display: Some(if hide { 1 } else { 0 }),
+                })
+                .collect();
+            if !changes.is_empty() {
+                let label = if hide { "Hide a field" } else { "Show a field" };
+                app.views[index].pending_edit =
+                    Some(pdfcraft_engine::Edit::Batch { label: label.into(), edits: vec![pdfcraft_engine::Edit::ApplyScriptChanges { changes }] });
+            }
+        }
         B::Alert(m) => app.notify(m),
         B::Submit(url) => {
             app.notify(format!("{name} submits the form to {url}; PdfCraft doesn't send form data. Save the document to keep your entries."))
@@ -2050,6 +2073,9 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                         .gap(6.0)
                         .show(|ui| {
                             for tool in crate::fill_sign::FILL_TOOLS {
+                                if matches!(tool, crate::fill_sign::FillTool::Signature | crate::fill_sign::FillTool::Initials) {
+                                    continue;
+                                }
                                 let on = current_fill == Some(tool);
                                 let (row, click) = ui.allocate_exact_size(vec2(180.0, 28.0), Sense::click());
                                 if click.hovered() {
@@ -2077,6 +2103,11 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                                     app.execute(tool.command());
                                     ui.close();
                                 }
+                            }
+                            ui.separator();
+                            if let Some(command) = crate::fill_sign::signature_entries(ui, app, &t) {
+                                app.execute(command);
+                                ui.close();
                             }
                         });
                     if let QuickTool::Comment(tool) = app.quick_tool {
